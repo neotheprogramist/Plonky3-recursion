@@ -14,8 +14,8 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_poseidon2_circuit_air::BabyBearD4Width16;
 use p3_recursion::pcs::MerkleCapTargets;
 use p3_recursion::{
-    BatchStarkVerifierInputsBuilder, FriVerifierParams, Poseidon2Config, VerificationError,
-    verify_batch_circuit,
+    BatchStarkVerifierInputsBuilder, CommonDataTargets, FriVerifierParams, Poseidon2Config,
+    Recursive, VerificationError, verify_batch_circuit,
 };
 use p3_test_utils::baby_bear_params::*;
 use rand::distr::{Distribution, StandardUniform};
@@ -338,6 +338,12 @@ fn test_batch_verifier_with_mixed_preprocessed() -> Result<(), VerificationError
     let batch_proof = prove_batch(&config, &instances, &prover_data);
     let airs = [mixed_air1, mixed_air2, mixed_air3];
     let common_data = &prover_data.common;
+
+    assert!(
+        CommonDataTargets::<MyConfig, MerkleCapTargets<F, DIGEST_ELEMS>>::get_values(common_data)
+            .is_empty(),
+        "verifier-fixed preprocessing must not be a replaceable public witness"
+    );
 
     verify_batch(&config, &airs, &batch_proof, &pvs, common_data).unwrap();
 

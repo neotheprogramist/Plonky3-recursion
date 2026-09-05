@@ -603,7 +603,7 @@ where
 impl<SC, Comm, OpeningProof> BatchStarkVerifierInputsBuilder<SC, Comm, OpeningProof>
 where
     SC: StarkGenericConfig,
-    Comm: Recursive<
+    Comm: crate::traits::ConstantRecursive<
             SC::Challenge,
             Input = <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment,
         >,

@@ -14,7 +14,7 @@ use p3_lookup::Lookup;
 use p3_uni_stark::{OpenedValues, Proof, StarkGenericConfig, Val};
 
 use crate::Target;
-use crate::traits::{Recursive, RecursiveChallenger};
+use crate::traits::{ConstantRecursive, Recursive, RecursiveChallenger};
 
 /// Structure representing all the targets necessary for an input proof.
 ///
@@ -157,7 +157,7 @@ pub struct CommonDataTargets<SC: StarkGenericConfig, Comm> {
 
 impl<SC: StarkGenericConfig, Comm> Recursive<SC::Challenge> for CommonDataTargets<SC, Comm>
 where
-    Comm: Recursive<
+    Comm: ConstantRecursive<
             SC::Challenge,
             Input = <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment,
         >,
@@ -169,7 +169,7 @@ where
             .preprocessed
             .as_ref()
             .map(|prep| GlobalPreprocessedTargets {
-                commitment: Comm::new(circuit, &prep.commitment),
+                commitment: Comm::new_constant(circuit, &prep.commitment),
                 instances: PreprocessedInstanceMetas {
                     instances: prep.instances.clone(),
                 },
@@ -184,14 +184,8 @@ where
         }
     }
 
-    fn get_values(input: &Self::Input) -> Vec<SC::Challenge> {
-        let mut values = vec![];
-        if let Some(prep) = &input.preprocessed {
-            values.extend(Comm::get_values(&prep.commitment));
-        }
-
-        // Lookups are given symbolically, so we don't need to extract concrete values here.
-        values
+    fn get_values(_input: &Self::Input) -> Vec<SC::Challenge> {
+        vec![]
     }
 }
 

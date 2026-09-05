@@ -1010,6 +1010,11 @@ impl<V: PoseidonVariant, F: Field + Send + Sync + 'static> NonPrimitiveExecutor<
         self.fill_sibling_data(&mut state, private_inputs, mmcs_bit, mmcs_bit2)?;
         // 3. Overwrite with any CTL-exposed witness values.
         self.apply_witness_values(&mut state, inputs, ctx)?;
+        // Explicit capacity inputs already carry the duplex tag; implicit continuation capacity
+        // needs the increment constrained by the AIR's absorb_len relation.
+        if self.absorb_len > 0 && inputs[self.config.rate_ext()].is_empty() {
+            state[self.config.rate_ext()] += F::from_u8(self.absorb_len as u8);
+        }
         // 4. Conditionally swap rate halves for the arity-2 Merkle direction bit.
         self.apply_merkle_swap(&mut state, mmcs_bit);
 

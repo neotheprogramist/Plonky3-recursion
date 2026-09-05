@@ -47,6 +47,11 @@ pub trait Recursive<F: Field> {
     fn get_values(input: &Self::Input) -> Vec<F>;
 }
 
+/// A recursive representation that embeds verifier-fixed values as circuit constants.
+pub trait ConstantRecursive<F: Field>: Recursive<F> {
+    fn new_constant(circuit: &mut CircuitBuilder<F>, input: &Self::Input) -> Self;
+}
+
 pub trait RecursiveLookupGadget<F: Field>: LookupProtocol {
     /// Enforce the single-terminal LogUp cross-AIR check: the sum of every present per-AIR
     /// terminal must be zero.

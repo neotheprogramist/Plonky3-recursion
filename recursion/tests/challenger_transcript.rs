@@ -1063,7 +1063,9 @@ mod baby_bear_d4 {
 
 mod koala_bear_d4 {
     use p3_poseidon2_circuit_air::KoalaBearD4Width16;
+    use p3_recursion::challenger_perm::ChallengerPermConfig;
     use p3_test_utils::koala_bear_params::*;
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -1083,6 +1085,55 @@ mod koala_bear_d4 {
 
     const fn new_challenger() -> CircuitChallenger<WIDTH, RATE, Poseidon2Config> {
         CircuitChallenger::new_koalabear()
+    }
+
+    struct Prefixed(Vec<u16>);
+
+    impl ChallengerPermConfig for Prefixed {
+        fn extension_degree(&self) -> usize {
+            Poseidon2Config::KOALA_BEAR_D4_W16.d()
+        }
+
+        fn as_poseidon2(&self) -> Option<&Poseidon2Config> {
+            Some(&Poseidon2Config::KOALA_BEAR_D4_W16)
+        }
+
+        fn initial_observations<BF: PrimeField64>(&self) -> Vec<BF> {
+            self.0
+                .iter()
+                .map(|&value| BF::from_u32(u32::from(value)))
+                .collect()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn protocol_prefix_matches_native_and_is_absorbed_once(
+            prefix in proptest::collection::vec(any::<u16>(), 0..=RATE * 3),
+            input in proptest::collection::vec(any::<u16>(), 0..=RATE * 3),
+        ) {
+            let mut native = DuplexChallenger::<F, _, WIDTH, RATE>::new(
+                default_koalabear_poseidon2_16(),
+            );
+            native.observe_slice(&prefix.iter().map(|&value| F::from_u32(u32::from(value))).collect::<Vec<_>>());
+            let mut builder = setup_circuit();
+            let mut challenger = CircuitChallenger::<WIDTH, RATE, _>::new(Prefixed(prefix));
+            challenger.init::<F, EF>(&mut builder);
+            challenger.init::<F, EF>(&mut builder);
+            for value in input {
+                let value = F::from_u32(u32::from(value));
+                native.observe(value);
+                let target = builder.define_const(EF::from(value));
+                RecursiveChallenger::<F, EF>::observe(&mut challenger, &mut builder, target);
+            }
+            for _ in 0..RATE * 2 {
+                let expected: F = native.sample();
+                let actual = RecursiveChallenger::<F, EF>::sample(&mut challenger, &mut builder);
+                let expected = builder.define_const(EF::from(expected));
+                builder.connect(actual, expected);
+            }
+            builder.build().expect("prefix circuit").runner().run().expect("native transcript parity");
+        }
     }
 
     /// Basic observe/sample transcript compatibility.

@@ -3,7 +3,10 @@
 //! Allows the verifier and circuit challenger to be parameterised by a permutation
 //! config without naming a specific hash (e.g. Poseidon2).
 
+use alloc::vec::Vec;
+
 use p3_circuit::ops::{Poseidon1Config, Poseidon2Config};
+use p3_field::PrimeField64;
 
 /// Config for the permutation used by the in-circuit challenger.
 ///
@@ -11,6 +14,11 @@ use p3_circuit::ops::{Poseidon1Config, Poseidon2Config};
 /// verifier and [`crate::CircuitChallenger`] use this trait so they do not depend
 /// on a specific hash by name.
 pub trait ChallengerPermConfig: Send + Sync {
+    /// Protocol-fixed observations absorbed before the proof transcript.
+    fn initial_observations<F: PrimeField64>(&self) -> Vec<F> {
+        Vec::new()
+    }
+
     /// Extension degree used by the in-circuit permutation NPO (`Poseidon2Config::d()`).
     ///
     /// This need not match the STARK challenge extension `EF::DIMENSION` (e.g. base

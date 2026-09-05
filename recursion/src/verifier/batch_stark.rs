@@ -324,7 +324,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn verify_p3_batch_proof_circuit<
     SC: StarkGenericConfig + 'static,
-    Comm: Recursive<
+    Comm: crate::traits::ConstantRecursive<
             SC::Challenge,
             Input = <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment,
         > + Clone

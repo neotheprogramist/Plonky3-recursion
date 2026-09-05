@@ -4,6 +4,7 @@ use alloc::{format, vec};
 use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, GrindingChallenger};
+use p3_circuit::ops::PermConfig;
 use p3_circuit::symbolic::RowSelectorsTargets;
 use p3_circuit::{CircuitBuilder, CircuitBuilderError, NonPrimitiveOpId};
 use p3_commit::{BatchOpening, ExtensionMmcs, Mmcs, OpenedValues, PolynomialSpace};
@@ -13,6 +14,7 @@ use p3_field::{
     TwoAdicField,
 };
 use p3_fri::{BatchMultiOpening, CommitPhaseMultiStep, FriProof, HidingFriPcs, TwoAdicFriPcs};
+use p3_matrix::Dimensions;
 use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs, PrunedMerklePaths};
 use p3_symmetric::{CryptographicHasher, MerkleCap, PseudoCompressionFunction};
 use p3_uni_stark::{StarkGenericConfig, Val};
@@ -25,8 +27,8 @@ use super::{FriVerifierParams, verify_fri_circuit};
 use crate::Target;
 use crate::challenger::CircuitChallenger;
 use crate::traits::{
-    ComsWithOpeningsTargets, Recursive, RecursiveChallenger, RecursiveExtensionMmcs, RecursiveMmcs,
-    RecursivePcs,
+    ComsWithOpeningsTargets, ConstantRecursive, Recursive, RecursiveChallenger,
+    RecursiveExtensionMmcs, RecursiveMmcs, RecursivePcs,
 };
 use crate::types::{OpenedValuesTargetsWithLookups, RecursiveLagrangeSelectors};
 use crate::verifier::{ObservableCommitment, VerificationError};
@@ -599,6 +601,21 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize> Recursive<EF>
     }
 }
 
+impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize> ConstantRecursive<EF>
+    for MerkleCapTargets<F, DIGEST_ELEMS>
+{
+    fn new_constant(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
+        Self {
+            cap_targets: input
+                .roots()
+                .iter()
+                .map(|root| root.map(|value| circuit.define_const(EF::from(value))))
+                .collect(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// `HashProofTargets` corresponds to a Merkle tree `Proof` in the form of a vector of hashes with `DIGEST_ELEMS` digest elements.
 pub struct HashProofTargets<F, const DIGEST_ELEMS: usize> {
     pub hash_proof_targets: Vec<[Target; DIGEST_ELEMS]>,
@@ -774,15 +791,92 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize, RecValMmcs: Rec
     type Proof = RecValMmcs::Proof;
 }
 
-/// Access to per-leaf salt targets carried by an MMCS opening proof.
+/// In-circuit verification for an MMCS opening proof.
 ///
 /// `MerkleTreeMmcs` openings carry no salts (returns an empty slice), while
 /// `MerkleTreeHidingMmcs` openings carry `SALT_ELEMS` salt targets per matrix that must be
 /// appended to the leaf preimage when recomputing the Merkle path in-circuit.
+/// Custom hash protocols override both verification methods; the defaults retain stock hashing.
 pub trait MmcsProofTargets {
     /// Per-matrix salt targets, in the same matrix order as the batch opened values.
     /// Empty when the underlying MMCS is non-hiding.
     fn salt_targets(&self) -> &[Vec<Target>];
+
+    /// Constrain a base-field opening under this MMCS's hash protocol.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_base<F, EF>(
+        &self,
+        circuit: &mut CircuitBuilder<EF>,
+        permutation: PermConfig,
+        cap: &[Vec<Target>],
+        dimensions: &[Dimensions],
+        index_bits: &[Target],
+        opened: &[Vec<Target>],
+    ) -> Result<Vec<NonPrimitiveOpId>, CircuitBuilderError>
+    where
+        F: PrimeField64 + TwoAdicField,
+        EF: ExtensionField<F>,
+    {
+        if permutation.is_arity4_shape() {
+            crate::pcs::verify_batch_circuit_arity4::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+            )
+        } else {
+            let salts = self.salt_targets();
+            crate::pcs::verify_batch_circuit::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+                (!salts.is_empty()).then_some(salts),
+            )
+        }
+    }
+
+    /// Constrain an extension-field opening under the same MMCS hash protocol.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_extension<F, EF>(
+        &self,
+        circuit: &mut CircuitBuilder<EF>,
+        permutation: PermConfig,
+        cap: &[Vec<Target>],
+        dimensions: &[Dimensions],
+        index_bits: &[Target],
+        opened: &[Vec<Target>],
+    ) -> Result<Vec<NonPrimitiveOpId>, CircuitBuilderError>
+    where
+        F: PrimeField64 + TwoAdicField,
+        EF: ExtensionField<F>,
+    {
+        if permutation.is_arity4_shape() {
+            crate::pcs::verify_batch_circuit_from_extension_opened_arity4::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+            )
+        } else {
+            let salts = self.salt_targets();
+            crate::pcs::verify_batch_circuit_from_extension_opened::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+                (!salts.is_empty()).then_some(salts),
+            )
+        }
+    }
 }
 
 impl<F, const DIGEST_ELEMS: usize> MmcsProofTargets for HashProofTargets<F, DIGEST_ELEMS> {

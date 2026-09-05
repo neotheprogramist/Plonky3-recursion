@@ -50,7 +50,7 @@ where
         >,
 {
     /// Commitment type used in the verifier circuit (e.g. HashTargets).
-    type Commitment: Recursive<
+    type Commitment: crate::traits::ConstantRecursive<
             Self::Challenge,
             Input = <Self::Pcs as Pcs<Self::Challenge, Self::Challenger>>::Commitment,
         > + Clone
