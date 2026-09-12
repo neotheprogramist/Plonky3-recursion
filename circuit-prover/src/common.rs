@@ -185,6 +185,10 @@ where
         non_primitive_base.extend(plugin_prep);
     }
 
+    for op_type in packing.required_npo() {
+        non_primitive_base.entry(op_type.clone()).or_default();
+    }
+
     // Get min_height from packing configuration and pass it to AIRs
     let min_height = packing.min_trace_height();
 
@@ -403,6 +407,7 @@ where
 
     // Iterate air builders first (fixed registration order) so that the
     // resulting AIR ordering matches the prover's non_primitive_provers order.
+    let mut built_npo = Vec::new();
     for builder in non_primitive_air_builders {
         for (op_type, prep_base) in non_primitive_base.iter() {
             // TablePacking overrides the builder's own default lane count.
@@ -432,12 +437,22 @@ where
                         allowed,
                     }));
                 }
+                built_npo.push(op_type.clone());
                 table_preps.push((air, degree));
                 break;
             }
         }
     }
 
+    for op_type in packing.required_npo() {
+        if !built_npo.contains(op_type) {
+            return Err(CircuitError::NonPrimitiveOpLayoutMismatch {
+                op: op_type.clone(),
+                expected: "an AIR builder for the required table".into(),
+                got: 0,
+            });
+        }
+    }
     Ok((table_preps, base_prep, non_primitive_base))
 }
 

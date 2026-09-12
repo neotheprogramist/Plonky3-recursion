@@ -32,6 +32,9 @@ pub struct TablePacking {
     /// falls back to [`Self::min_trace_height`].
     #[serde(default)]
     npo_min_heights: Vec<(NpoTypeId, usize)>,
+    /// Tables that must be present even when they execute no operations.
+    #[serde(default)]
+    required_npo: Vec<NpoTypeId>,
     /// Minimum trace height for all tables (must be power of two).
     /// This is required for FRI with higher `log_final_poly_len`.
     /// FRI requires: `log_trace_height > log_final_poly_len + log_blowup`
@@ -77,6 +80,7 @@ impl TablePacking {
             public_min_height: None,
             const_min_height: None,
             npo_min_heights: Vec::new(),
+            required_npo: Vec::new(),
             min_trace_height: 1,
             horner_packed_steps: 2,
             strict: false,
@@ -159,6 +163,25 @@ impl TablePacking {
             self.npo_min_heights.push((op_type, height));
         }
         self
+    }
+
+    /// Require a non-primitive table, including its canonical empty trace.
+    #[must_use]
+    pub fn with_required_npo(mut self, op_type: NpoTypeId) -> Self {
+        if !self.required_npo.contains(&op_type) {
+            self.required_npo.push(op_type);
+        }
+        self
+    }
+
+    /// Required non-primitive table identities.
+    pub fn required_npo(&self) -> &[NpoTypeId] {
+        &self.required_npo
+    }
+
+    /// Whether the layout requires this table even without active operations.
+    pub fn requires_npo(&self, op_type: &NpoTypeId) -> bool {
+        self.required_npo.contains(op_type)
     }
 
     /// Update the current [`TablePacking`] with a minimum trace height requirement.

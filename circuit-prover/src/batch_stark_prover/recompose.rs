@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use hashbrown::HashMap;
 use p3_baby_bear::BabyBear;
 use p3_batch_stark::{StarkGenericConfig, Val};
-use p3_circuit::ops::recompose::RecomposeTrace;
+use p3_circuit::ops::recompose::{RecomposeTrace, RecomposeTraceKind};
 use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId};
 use p3_circuit::tables::Traces;
 use p3_circuit::{CircuitError, PreprocessedColumns};
@@ -74,12 +74,22 @@ impl<const D: usize> RecomposeProver<D> {
         } else {
             NpoTypeId::recompose()
         };
-        let trace = traces.non_primitive_traces.get(&op_type)?;
-        if trace.rows() == 0 {
+        let empty = RecomposeTrace {
+            operations: Vec::new(),
+            kind: if self.coeff_lookups {
+                RecomposeTraceKind::WithCoeffLookups
+            } else {
+                RecomposeTraceKind::Standard
+            },
+        };
+        let t = match traces.non_primitive_traces.get(&op_type) {
+            Some(trace) => trace.as_any().downcast_ref::<RecomposeTrace<Val<SC>>>()?,
+            None if packing.requires_npo(&op_type) => &empty,
+            None => return None,
+        };
+        if t.total_rows() == 0 && !packing.requires_npo(&op_type) {
             return None;
         }
-
-        let t = trace.as_any().downcast_ref::<RecomposeTrace<Val<SC>>>()?;
 
         let num_ops = t.total_rows();
         // Prefer the per-op override from TablePacking; fall back to the prover's own default.
@@ -124,7 +134,7 @@ impl<const D: usize> RecomposeProver<D> {
             air: DynamicAirEntry::new(Box::new(air)),
             trace: matrix,
             public_values: Vec::new(),
-            rows: num_ops,
+            rows: num_ops.max(1),
             lanes,
         })
     }

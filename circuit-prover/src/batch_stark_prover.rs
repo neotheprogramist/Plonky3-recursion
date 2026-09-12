@@ -723,6 +723,10 @@ where
 /// verification so malformed serialized metadata is rejected up front.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProofMetadataError {
+    /// A declared required non-primitive table was not constructed.
+    #[error("required non-primitive table {0:?} is missing")]
+    MissingRequiredTable(NpoTypeId),
+
     /// A primitive table row count is zero (constructors require non-zero).
     #[error("primitive table row count must be non-zero")]
     ZeroRowCount,
@@ -1582,6 +1586,15 @@ where
                 if let Some(instance) = p.batch_instance_d5(&self.config, packing, t) {
                     dynamic_instances.push(instance);
                 }
+            }
+        }
+
+        for op_type in packing.required_npo() {
+            if !dynamic_instances
+                .iter()
+                .any(|instance| &instance.op_type == op_type)
+            {
+                return Err(ProofMetadataError::MissingRequiredTable(op_type.clone()).into());
             }
         }
 

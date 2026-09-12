@@ -6,6 +6,7 @@ use p3_circuit::CircuitBuilder;
 use p3_circuit::ops::{generate_poseidon2_trace, generate_recompose_trace};
 use p3_commit::Pcs;
 use p3_dft::Radix2DitParallel;
+use p3_field::TwoAdicField;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_fri::FriParameters;
 use p3_matrix::dense::RowMajorMatrix;
@@ -211,6 +212,41 @@ fn produce_inputs_multi(
         &restore_cwop,
     )
     .expect("an honest proof's Merkle paths restore");
+
+    let folding: p3_fri::TwoAdicFriFoldingForMmcs<F, MyMmcs> =
+        p3_fri::TwoAdicFriFolding(core::marker::PhantomData);
+    p3_fri::verifier::verify_fri(
+        &folding,
+        fri_params,
+        &fri_proof,
+        &mut v_challenger.clone(),
+        &restore_cwop,
+        val_mmcs,
+    )
+    .expect("native verifier accepts the honest FRI proof");
+    for commit_phase in [false, true] {
+        let mut corrupted = fri_proof.clone();
+        let path = if commit_phase {
+            &mut corrupted.commit_phase_openings[0]
+                .opening_proof
+                .sibling_hashes
+        } else {
+            &mut corrupted.input_openings[0].opening_proof.sibling_hashes
+        };
+        path[0][0] += F::ONE;
+        assert!(
+            p3_fri::verifier::verify_fri(
+                &folding,
+                fri_params,
+                &corrupted,
+                &mut v_challenger.clone(),
+                &restore_cwop,
+                val_mmcs,
+            )
+            .is_err(),
+            "native FRI verifier accepted a corrupted Merkle path"
+        );
+    }
 
     // α (batch combiner)
     let alpha: Challenge = v_challenger.sample_algebra_element();
@@ -797,14 +833,44 @@ fn run_fri_test_with_mmcs(setup: FriSetup) {
 
     // Run the circuit
     runner.run().expect("FRI+MMCS circuit execution failed");
+    for commit_phase in [false, true] {
+        let mut paths = result.query_paths.clone();
+        let path = if commit_phase {
+            &mut paths[0].commit_phase[0]
+        } else {
+            &mut paths[0].input[0]
+        };
+        path[0][0] += F::ONE;
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&packed_inputs).unwrap();
+        runner.set_private_inputs(&private_inputs).unwrap();
+        set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
+            &mut runner,
+            &mmcs_op_ids,
+            &paths,
+            Poseidon2Config::BABY_BEAR_D4_W16,
+        )
+        .expect("corruption preserves the authentication path shape");
+        assert!(
+            runner.run().is_err(),
+            "in-circuit FRI accepted a corrupted Merkle path"
+        );
+    }
 }
 
 #[test]
 fn test_circuit_fri_verifier_with_mmcs() {
     // Test that the FRI circuit with MMCS verification builds and runs correctly.
-    let groups = vec![vec![4u8, 5]];
-    let setup = generate_setup(1, groups);
-    run_fri_test_with_mmcs(setup);
+    for (final_poly, groups) in [
+        (1, vec![vec![4u8, 5]]),
+        (1, vec![vec![4], vec![5]]),
+        (0, vec![vec![0, 5, 8, 8, 10], vec![8, 11], vec![4, 5, 8]]),
+        (1, vec![vec![3, 4], vec![5]]),
+        (2, vec![vec![4], vec![5]]),
+    ] {
+        let setup = generate_setup(final_poly, groups);
+        run_fri_test_with_mmcs(setup);
+    }
 }
 
 /// Allocate `FriProofTargets` for `result` and wire `verify_fri_circuit`,
@@ -982,4 +1048,38 @@ fn test_fri_verifier_rejects_zero_query_proof() {
         matches!(err, VerificationError::InvalidProofShape(_)),
         "expected InvalidProofShape, got {err:?}"
     );
+}
+
+#[test]
+fn fri_rejects_domains_beyond_the_sampled_index_or_field() {
+    let setup = generate_setup(0, vec![vec![5], vec![6]]);
+    let mut result = produce_inputs_multi(
+        &setup.pcs,
+        &setup.perm,
+        setup.log_blowup,
+        setup.log_final_poly_len,
+        (setup.commit_pow_bits, setup.query_pow_bits),
+        &setup.group_sizes,
+        0,
+        &setup.val_mmcs,
+        &setup.fri_params,
+    );
+    try_build_fri_verifier(&result, setup.log_blowup).unwrap();
+    let original_height = result.log_max_height;
+    result.log_max_height = F::TWO_ADICITY + 1;
+    assert!(matches!(
+        try_build_fri_verifier(&result, setup.log_blowup),
+        Err(VerificationError::InvalidProofShape(message)) if message.contains("field or platform domain limit")
+    ));
+    result.log_max_height = original_height;
+    result.commitments_with_points[0].1[0].0 =
+        TwoAdicMultiplicativeCoset::new(F::GENERATOR, original_height).unwrap();
+    assert!(matches!(
+        try_build_fri_verifier(&result, setup.log_blowup),
+        Err(VerificationError::InvalidProofShape(message)) if message == "Batch height exceeds FRI domain"
+    ));
+    assert!(matches!(
+        try_build_fri_verifier(&result, usize::MAX),
+        Err(VerificationError::InvalidProofShape(message)) if message == "FRI height arithmetic overflow"
+    ));
 }

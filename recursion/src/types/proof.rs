@@ -155,6 +155,15 @@ pub struct CommonDataTargets<SC: StarkGenericConfig, Comm> {
     pub lookups: Vec<Vec<Lookup<Val<SC>>>>,
 }
 
+impl<SC: StarkGenericConfig, Comm> CommonDataTargets<SC, Comm> {
+    /// The commitment consumed by this verifier, for binding a child verifier key.
+    pub fn preprocessed_commitment(&self) -> Option<&Comm> {
+        self.preprocessed
+            .as_ref()
+            .map(|preprocessed| &preprocessed.commitment)
+    }
+}
+
 impl<SC: StarkGenericConfig, Comm> Recursive<SC::Challenge> for CommonDataTargets<SC, Comm>
 where
     Comm: Recursive<
@@ -316,20 +325,6 @@ impl<
 
     /// Allocates the necessary circuit targets for storing the proof's public data.
     fn new(circuit: &mut CircuitBuilder<SC::Challenge>, input: &Self::Input) -> Self {
-        // Flattened opened values are ordered as:
-        // 1. All `trace_local` rows per instance (instance 0 .. N)
-        // 2. All `trace_next` rows per instance (instance 0 .. N)
-        // 3. Quotient chunks for each instance in commit order
-        let num_instances = input.opened_values.instances.len();
-        let mut aggregated_trace_local = Vec::with_capacity(num_instances);
-        let mut aggregated_trace_next = Vec::with_capacity(num_instances);
-        let mut aggregated_permutation_local = Vec::with_capacity(num_instances);
-        let mut aggregated_permutation_next = Vec::with_capacity(num_instances);
-        let mut aggregated_preprocessed_local = Vec::with_capacity(num_instances);
-        let mut aggregated_preprocessed_next = Vec::with_capacity(num_instances);
-        let mut aggregated_quotient_chunks = Vec::with_capacity(num_instances);
-        let mut aggregated_random = Vec::with_capacity(num_instances);
-
         let commitments_targets = CommitmentTargets::new(circuit, &input.commitments);
         let opened_values_targets = BatchOpenedValuesTargets::new(circuit, &input.opened_values);
         let opening_proof = OpeningProof::new(circuit, &input.opening_proof);
@@ -343,60 +338,13 @@ impl<
             })
             .collect::<Vec<_>>();
 
-        for instance in &opened_values_targets.instances {
-            aggregated_trace_local.extend(&instance.opened_values_no_lookups.trace_local_targets);
-            aggregated_trace_next.extend(&instance.opened_values_no_lookups.trace_next_targets);
-            if let Some(prep_local) = &instance.opened_values_no_lookups.preprocessed_local_targets
-            {
-                aggregated_preprocessed_local.extend(prep_local);
-            }
-            if let Some(prep_next) = &instance.opened_values_no_lookups.preprocessed_next_targets {
-                aggregated_preprocessed_next.extend(prep_next);
-            }
-            aggregated_permutation_local.extend(&instance.permutation_local_targets);
-            aggregated_permutation_next.extend(&instance.permutation_next_targets);
-            for chunk in &instance.opened_values_no_lookups.quotient_chunks_targets {
-                aggregated_quotient_chunks.push(chunk.clone());
-            }
-            if let Some(random) = &instance.opened_values_no_lookups.random_targets {
-                aggregated_random.extend(random);
-            }
-        }
-
-        let flattened_opened_values_targets = OpenedValuesTargetsWithLookups {
-            opened_values_no_lookups: OpenedValuesTargets {
-                trace_local_targets: aggregated_trace_local,
-                trace_next_targets: aggregated_trace_next,
-                preprocessed_local_targets: if aggregated_preprocessed_local.is_empty() {
-                    None
-                } else {
-                    Some(aggregated_preprocessed_local)
-                },
-                preprocessed_next_targets: if aggregated_preprocessed_next.is_empty() {
-                    None
-                } else {
-                    Some(aggregated_preprocessed_next)
-                },
-                quotient_chunks_targets: aggregated_quotient_chunks,
-                random_targets: if aggregated_random.is_empty() {
-                    None
-                } else {
-                    Some(aggregated_random)
-                },
-                _phantom: PhantomData,
-            },
-            permutation_local_targets: aggregated_permutation_local,
-            permutation_next_targets: aggregated_permutation_next,
-        };
-
-        Self {
+        Self::from_parts(
             commitments_targets,
-            opened_values_targets,
-            flattened_opened_values_targets,
+            opened_values_targets.instances,
             opening_proof,
             lookup_terminals,
-            degree_bits: input.degree_bits.clone(),
-        }
+            input.degree_bits.clone(),
+        )
     }
 
     fn get_values(input: &Self::Input) -> Vec<SC::Challenge> {
@@ -623,5 +571,91 @@ impl<SC: StarkGenericConfig> Recursive<SC::Challenge> for BatchOpenedValuesTarge
             ));
         }
         values
+    }
+}
+
+impl<SC, Comm, OpeningProof> BatchProofTargets<SC, Comm, OpeningProof>
+where
+    SC: StarkGenericConfig,
+    Comm: Recursive<SC::Challenge>,
+    OpeningProof: Recursive<SC::Challenge>,
+{
+    /// Assemble allocated instance targets in the canonical PCS opening order.
+    pub fn from_parts(
+        commitments_targets: CommitmentTargets<SC::Challenge, Comm>,
+        instances: Vec<OpenedValuesTargetsWithLookups<SC>>,
+        opening_proof: OpeningProof,
+        lookup_terminals: Vec<Option<Target>>,
+        degree_bits: Vec<usize>,
+    ) -> Self {
+        // Flattened opened values are ordered as:
+        // 1. All `trace_local` rows per instance (instance 0 .. N)
+        // 2. All `trace_next` rows per instance (instance 0 .. N)
+        // 3. Quotient chunks for each instance in commit order
+        let num_instances = instances.len();
+        let mut aggregated_trace_local = Vec::with_capacity(num_instances);
+        let mut aggregated_trace_next = Vec::with_capacity(num_instances);
+        let mut aggregated_permutation_local = Vec::with_capacity(num_instances);
+        let mut aggregated_permutation_next = Vec::with_capacity(num_instances);
+        let mut aggregated_preprocessed_local = Vec::with_capacity(num_instances);
+        let mut aggregated_preprocessed_next = Vec::with_capacity(num_instances);
+        let mut aggregated_quotient_chunks = Vec::with_capacity(num_instances);
+        let mut aggregated_random = Vec::with_capacity(num_instances);
+
+        let opened_values_targets = BatchOpenedValuesTargets { instances };
+        for instance in &opened_values_targets.instances {
+            aggregated_trace_local.extend(&instance.opened_values_no_lookups.trace_local_targets);
+            aggregated_trace_next.extend(&instance.opened_values_no_lookups.trace_next_targets);
+            if let Some(prep_local) = &instance.opened_values_no_lookups.preprocessed_local_targets
+            {
+                aggregated_preprocessed_local.extend(prep_local);
+            }
+            if let Some(prep_next) = &instance.opened_values_no_lookups.preprocessed_next_targets {
+                aggregated_preprocessed_next.extend(prep_next);
+            }
+            aggregated_permutation_local.extend(&instance.permutation_local_targets);
+            aggregated_permutation_next.extend(&instance.permutation_next_targets);
+            for chunk in &instance.opened_values_no_lookups.quotient_chunks_targets {
+                aggregated_quotient_chunks.push(chunk.clone());
+            }
+            if let Some(random) = &instance.opened_values_no_lookups.random_targets {
+                aggregated_random.extend(random);
+            }
+        }
+
+        let flattened_opened_values_targets = OpenedValuesTargetsWithLookups {
+            opened_values_no_lookups: OpenedValuesTargets {
+                trace_local_targets: aggregated_trace_local,
+                trace_next_targets: aggregated_trace_next,
+                preprocessed_local_targets: if aggregated_preprocessed_local.is_empty() {
+                    None
+                } else {
+                    Some(aggregated_preprocessed_local)
+                },
+                preprocessed_next_targets: if aggregated_preprocessed_next.is_empty() {
+                    None
+                } else {
+                    Some(aggregated_preprocessed_next)
+                },
+                quotient_chunks_targets: aggregated_quotient_chunks,
+                random_targets: if aggregated_random.is_empty() {
+                    None
+                } else {
+                    Some(aggregated_random)
+                },
+                _phantom: PhantomData,
+            },
+            permutation_local_targets: aggregated_permutation_local,
+            permutation_next_targets: aggregated_permutation_next,
+        };
+
+        Self {
+            commitments_targets,
+            opened_values_targets,
+            flattened_opened_values_targets,
+            opening_proof,
+            lookup_terminals,
+            degree_bits,
+        }
     }
 }

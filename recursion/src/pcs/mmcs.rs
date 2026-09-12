@@ -588,6 +588,28 @@ fn validate_commitment_cap<T>(
     Ok(cap_height)
 }
 
+/// Select the committed root above a binary Merkle path, returning the path depth.
+pub fn select_commitment_cap<EF: Field>(
+    circuit: &mut CircuitBuilder<EF>,
+    cap: &[Vec<Target>],
+    index_bits: &[Target],
+) -> Result<(usize, Vec<Target>), CircuitBuilderError> {
+    let cap_height = validate_commitment_cap(cap, index_bits.len())?;
+    if cap.iter().any(Vec::is_empty) || !cap.iter().map(Vec::len).all_equal() {
+        return Err(CircuitBuilderError::InvalidMerkleCap {
+            details: "commitment cap entries must have one nonzero digest width".into(),
+        });
+    }
+    let path_depth = index_bits.len() - cap_height;
+    for &bit in &index_bits[path_depth..] {
+        circuit.assert_bool(bit);
+    }
+    Ok((
+        path_depth,
+        select_cap_entry(circuit, cap, &index_bits[path_depth..]),
+    ))
+}
+
 /// Select one cap entry from a Merkle cap using a binary tree multiplexer.
 ///
 /// For `cap_height = 0` (single entry), returns the entry directly.

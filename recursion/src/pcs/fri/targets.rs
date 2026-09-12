@@ -4,6 +4,7 @@ use alloc::{format, vec};
 use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, GrindingChallenger};
+use p3_circuit::ops::PermConfig;
 use p3_circuit::symbolic::RowSelectorsTargets;
 use p3_circuit::{CircuitBuilder, CircuitBuilderError, NonPrimitiveOpId};
 use p3_commit::{BatchOpening, ExtensionMmcs, Mmcs, OpenedValues, PolynomialSpace};
@@ -13,6 +14,7 @@ use p3_field::{
     TwoAdicField,
 };
 use p3_fri::{BatchMultiOpening, CommitPhaseMultiStep, FriProof, HidingFriPcs, TwoAdicFriPcs};
+use p3_matrix::Dimensions;
 use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs, PrunedMerklePaths};
 use p3_symmetric::{CryptographicHasher, MerkleCap, PseudoCompressionFunction};
 use p3_uni_stark::{StarkGenericConfig, Val};
@@ -715,13 +717,7 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize> Recursive<EF>
     type Input = ValMmcsCommitment<F, DIGEST_ELEMS>;
 
     fn new(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
-        let cap_targets = (0..input.num_roots())
-            .map(|_| circuit.alloc_public_input_array("MMCS commitment cap entry"))
-            .collect();
-        Self {
-            cap_targets,
-            _phantom: PhantomData,
-        }
+        Self::allocate(circuit, input.num_roots())
     }
 
     fn get_values(input: &Self::Input) -> Vec<EF> {
@@ -814,10 +810,7 @@ impl<F: Field, EF: ExtensionField<F>> Recursive<EF> for Witness<F> {
     type Input = F;
 
     fn new(circuit: &mut CircuitBuilder<EF>, _input: &Self::Input) -> Self {
-        Self {
-            witness: circuit.alloc_public_input("FRI proof-of-work witness"),
-            _phantom: PhantomData,
-        }
+        Self::allocate(circuit)
     }
 
     fn get_values(input: &Self::Input) -> Vec<EF> {
@@ -943,15 +936,90 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize, RecValMmcs: Rec
     type Proof = RecValMmcs::Proof;
 }
 
-/// Access to per-leaf salt targets carried by an MMCS opening proof.
+/// In-circuit verification for an MMCS opening proof.
 ///
 /// `MerkleTreeMmcs` openings carry no salts (returns an empty slice), while
 /// `MerkleTreeHidingMmcs` openings carry `SALT_ELEMS` salt targets per matrix that must be
 /// appended to the leaf preimage when recomputing the Merkle path in-circuit.
+/// Custom hash protocols override both verification methods; the defaults retain stock hashing.
 pub trait MmcsProofTargets {
     /// Per-matrix salt targets, in the same matrix order as the batch opened values.
     /// Empty when the underlying MMCS is non-hiding.
     fn salt_targets(&self) -> &[Vec<Target>];
+
+    /// Constrain a base-field opening under this MMCS's hash protocol.
+    fn verify_base<F, EF>(
+        &self,
+        circuit: &mut CircuitBuilder<EF>,
+        permutation: PermConfig,
+        cap: &[Vec<Target>],
+        dimensions: &[Dimensions],
+        index_bits: &[Target],
+        opened: &[Vec<Target>],
+    ) -> Result<Vec<NonPrimitiveOpId>, CircuitBuilderError>
+    where
+        F: PrimeField64 + TwoAdicField,
+        EF: ExtensionField<F>,
+    {
+        if permutation.is_arity4_shape() {
+            crate::pcs::verify_batch_circuit_arity4::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+            )
+        } else {
+            let salts = self.salt_targets();
+            crate::pcs::verify_batch_circuit::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+                (!salts.is_empty()).then_some(salts),
+            )
+        }
+    }
+
+    /// Constrain an extension-field opening under the same MMCS hash protocol.
+    fn verify_extension<F, EF>(
+        &self,
+        circuit: &mut CircuitBuilder<EF>,
+        permutation: PermConfig,
+        cap: &[Vec<Target>],
+        dimensions: &[Dimensions],
+        index_bits: &[Target],
+        opened: &[Vec<Target>],
+    ) -> Result<Vec<NonPrimitiveOpId>, CircuitBuilderError>
+    where
+        F: PrimeField64 + TwoAdicField,
+        EF: ExtensionField<F>,
+    {
+        if permutation.is_arity4_shape() {
+            crate::pcs::verify_batch_circuit_from_extension_opened_arity4::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+            )
+        } else {
+            let salts = self.salt_targets();
+            crate::pcs::verify_batch_circuit_from_extension_opened::<F, EF>(
+                circuit,
+                permutation,
+                cap,
+                dimensions,
+                index_bits,
+                opened,
+                (!salts.is_empty()).then_some(salts),
+            )
+        }
+    }
 }
 
 impl<F, const DIGEST_ELEMS: usize> MmcsProofTargets for HashProofTargets<F, DIGEST_ELEMS> {
@@ -2179,5 +2247,71 @@ mod prepared_shape_tests {
         let left_shape: FriShape<_, _, _, _> = OpeningTargets::input_shape(&left).unwrap();
         let right_shape = OpeningTargets::input_shape(&right).unwrap();
         assert!(left_shape == right_shape);
+    }
+}
+
+impl<F: Field, const DIGEST_ELEMS: usize> MerkleCapTargets<F, DIGEST_ELEMS> {
+    /// Allocate a cap with the root count fixed by the verifier layout.
+    pub fn allocate<EF: ExtensionField<F>>(circuit: &mut CircuitBuilder<EF>, roots: usize) -> Self {
+        Self {
+            cap_targets: (0..roots)
+                .map(|_| circuit.alloc_public_input_array("MMCS commitment cap entry"))
+                .collect(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<F: Field> Witness<F> {
+    /// Allocate the protocol's single proof-of-work field element.
+    pub fn allocate<EF: ExtensionField<F>>(circuit: &mut CircuitBuilder<EF>) -> Self {
+        Self {
+            witness: circuit.alloc_public_input("FRI proof-of-work witness"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<EF: Field> HidingOpenedValuesTargets<EF> {
+    /// Allocate hiding openings from round, matrix and point widths.
+    pub fn allocate(circuit: &mut CircuitBuilder<EF>, widths: &[Vec<Vec<usize>>]) -> Self {
+        Self {
+            rounds: widths
+                .iter()
+                .map(|round| {
+                    round
+                        .iter()
+                        .map(|matrix| {
+                            matrix
+                                .iter()
+                                .map(|&width| {
+                                    circuit
+                                        .alloc_private_inputs(width, "hiding random opened values")
+                                })
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<F: Field, EF: ExtensionField<F>, RecMmcs: RecursiveExtensionMmcs<F, EF>>
+    CommitPhaseProofStepTargets<F, EF, RecMmcs>
+{
+    /// Assemble a fold step allocated from a fixed verifier layout.
+    pub fn from_parts(
+        log_arity: usize,
+        sibling_coefficients: Vec<Target>,
+        opening_proof: RecMmcs::Proof,
+    ) -> Self {
+        Self {
+            log_arity,
+            sibling_coefficients,
+            opening_proof,
+            _phantom: PhantomData,
+        }
     }
 }

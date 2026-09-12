@@ -1133,10 +1133,16 @@ impl Poseidon2Prover {
             Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
     {
         let op_type = NpoTypeId::poseidon2_perm(self.config);
-        let t = traces.non_primitive_trace::<Poseidon2Trace<Val<SC>>>(&op_type)?;
-
-        let rows = t.total_rows();
-        if rows == 0 {
+        let empty = Poseidon2Trace {
+            op_type: op_type.clone(),
+            operations: Vec::new(),
+        };
+        let t = match traces.non_primitive_trace::<Poseidon2Trace<Val<SC>>>(&op_type) {
+            Some(trace) => trace,
+            None if packing.requires_npo(&op_type) => &empty,
+            None => return None,
+        };
+        if t.total_rows() == 0 && !packing.requires_npo(&op_type) {
             return None;
         }
 

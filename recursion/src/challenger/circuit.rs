@@ -157,6 +157,13 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
         let zero = circuit.define_const(EF::ZERO);
         self.state = vec![zero; WIDTH];
         self.initialized = true;
+        let prefix = self
+            .config
+            .initial_observations::<BF>()
+            .into_iter()
+            .map(|value| circuit.define_const(EF::from(value)))
+            .collect::<Vec<_>>();
+        <Self as RecursiveChallenger<BF, EF>>::observe_slice(self, circuit, &prefix);
     }
 
     /// Perform duplexing: absorb inputs, permute, fill output buffer.

@@ -17,10 +17,7 @@ use p3_util::zip_eq::zip_eq;
 
 use super::{FriProofTargets, InputProofTargets};
 use crate::Target;
-use crate::pcs::{
-    MmcsProofTargets, verify_batch_circuit, verify_batch_circuit_arity4,
-    verify_batch_circuit_from_extension_opened, verify_batch_circuit_from_extension_opened_arity4,
-};
+use crate::pcs::MmcsProofTargets;
 use crate::traits::{ComsWithOpeningsTargets, Recursive, RecursiveExtensionMmcs, RecursiveMmcs};
 use crate::verifier::{ObservableCommitment, VerificationError};
 
@@ -1068,7 +1065,7 @@ fn circuit_exp_by_constant<EF: Field>(
 ///
 /// Reference (Plonky3): `p3_fri::verifier::open_input`
 #[allow(clippy::type_complexity)]
-fn open_input<F, EF, Comm>(
+fn open_input<F, EF, Comm, Proof>(
     builder: &mut CircuitBuilder<EF>,
     log_global_max_height: usize,
     index_bits: &[Target],
@@ -1076,7 +1073,7 @@ fn open_input<F, EF, Comm>(
     log_blowup: usize,
     commitments_with_opening_points: &ComsWithOpeningsTargets<Comm, TwoAdicMultiplicativeCoset<F>>,
     batch_opened_values: &[Vec<Vec<Target>>], // Per batch -> per matrix -> per column
-    batch_salts: &[Vec<Vec<Target>>],         // Per batch -> per matrix -> salt (hiding MMCS)
+    batch_proofs: &[&Proof],
     permutation_config: Option<PermConfig>,
     pre_packed_input_caps: Option<&[Vec<Vec<Target>>]>,
 ) -> Result<(Vec<(usize, Target)>, Vec<NonPrimitiveOpId>), VerificationError>
@@ -1084,6 +1081,7 @@ where
     F: Field + TwoAdicField + PrimeField64,
     EF: ExtensionField<F>,
     Comm: ObservableCommitment,
+    Proof: MmcsProofTargets,
 {
     builder.push_scope("open_input");
 
@@ -1146,25 +1144,32 @@ where
                 commitment_cap_rows_from_lifted::<F, EF>(builder, perm_config, &lifted_commitment)
             };
 
-            // Match native `p3_fri::verifier::open_input`: width is unused by MerkleTreeMmcs
-            // verification (only height drives grouping); see Plonky3 TODO on Dimensions.width.
             let dimensions: Vec<Dimensions> = mats
                 .iter()
-                .map(|(domain, _)| Dimensions {
-                    height: 1 << (domain.log_size() + log_blowup),
-                    width: 0,
+                .map(|(domain, points)| {
+                    let (_, values) = points.first().ok_or_else(|| {
+                        VerificationError::InvalidProofShape(
+                            "MMCS matrix has no opening points".into(),
+                        )
+                    })?;
+                    Ok(Dimensions {
+                        height: 1 << (domain.log_size() + log_blowup),
+                        width: values.len(),
+                    })
                 })
-                .collect();
+                .collect::<Result<_, VerificationError>>()?;
+            let batch_log_height = mats
+                .iter()
+                .map(|(domain, _)| domain.log_size() + log_blowup)
+                .max()
+                .ok_or_else(|| {
+                    VerificationError::InvalidProofShape("Empty committed batch".into())
+                })?;
+            // Native FRI right-shifts the global query index for a shorter committed batch.
+            let index_bits = &index_bits[log_global_max_height - batch_log_height..];
 
-            // Hiding MMCS appends a per-matrix salt to each leaf; non-hiding passes `None`.
-            let batch_salt = batch_salts.get(batch_idx);
-            let salts_for_batch = match batch_salt {
-                Some(s) if !s.is_empty() => Some(s.as_slice()),
-                _ => None,
-            };
-
-            let op_ids = if perm_config.is_arity4_shape() {
-                verify_batch_circuit_arity4::<F, EF>(
+            let op_ids = batch_proofs[batch_idx]
+                .verify_base::<F, EF>(
                     builder,
                     perm_config,
                     &commitment_cap,
@@ -1172,22 +1177,11 @@ where
                     index_bits,
                     batch_openings,
                 )
-            } else {
-                verify_batch_circuit::<F, EF>(
-                    builder,
-                    perm_config,
-                    &commitment_cap,
-                    &dimensions,
-                    index_bits,
-                    batch_openings,
-                    salts_for_batch,
-                )
-            }
-            .map_err(|e| {
-                VerificationError::InvalidProofShape(format!(
-                    "MMCS verification failed for batch {batch_idx}: {e:?}"
-                ))
-            })?;
+                .map_err(|e| {
+                    VerificationError::InvalidProofShape(format!(
+                        "MMCS verification failed for batch {batch_idx}: {e:?}"
+                    ))
+                })?;
             mmcs_op_ids.extend(op_ids);
         }
 
@@ -1450,6 +1444,23 @@ where
     }
 
     let log_max_height = index_bits_per_query[0].len();
+    if log_max_height > F::TWO_ADICITY.min(usize::BITS as usize - 1) {
+        return Err(VerificationError::InvalidProofShape(
+            "FRI height exceeds the field or platform domain limit".into(),
+        ));
+    }
+    for (_, matrices) in commitments_with_opening_points {
+        for (domain, _) in matrices {
+            let height = domain.log_size().checked_add(log_blowup).ok_or_else(|| {
+                VerificationError::InvalidProofShape("FRI height arithmetic overflow".into())
+            })?;
+            if height > log_max_height {
+                return Err(VerificationError::InvalidProofShape(
+                    "Batch height exceeds FRI domain".into(),
+                ));
+            }
+        }
+    }
     if index_bits_per_query
         .iter()
         .any(|v| v.len() != log_max_height)
@@ -1576,17 +1587,14 @@ where
             .map(|batch| batch.opened_values.clone())
             .collect();
 
-        // Per-batch hiding-MMCS salts (empty for a non-hiding `MerkleTreeMmcs`). These are
-        // appended to the leaf preimage during MMCS verification but never enter the FRI
-        // polynomial reduction, matching native `MerkleTreeHidingMmcs`.
-        let batch_salts: Vec<Vec<Vec<Target>>> = query_proof
+        let batch_proofs: Vec<_> = query_proof
             .input_proof
             .iter()
-            .map(|batch| batch.opening_proof.salt_targets().to_vec())
+            .map(|batch| &batch.opening_proof)
             .collect();
 
         // Arithmetic `open_input` to get (height, ro) descending, plus MMCS op IDs
-        let (reduced_by_height, input_mmcs_ops) = open_input::<F, EF, Comm>(
+        let (reduced_by_height, input_mmcs_ops) = open_input::<F, EF, Comm, _>(
             builder,
             log_max_height,
             &index_bits_per_query[q],
@@ -1594,7 +1602,7 @@ where
             log_blowup,
             commitments_with_opening_points,
             &batch_opened_values,
-            &batch_salts,
+            &batch_proofs,
             permutation_config,
             pre_packed_input_caps.as_deref(),
         )?;
@@ -1749,16 +1757,8 @@ where
                     parent_index_bits.push(zero);
                 }
 
-                // Hiding FRI MMCS salts the folded-codeword leaf; non-hiding passes `None`.
-                let phase_salts = opening.opening_proof.salt_targets();
-                let salts_for_phase = if phase_salts.is_empty() {
-                    None
-                } else {
-                    Some(phase_salts)
-                };
-
-                let commit_phase_ops = if perm_config.is_arity4_shape() {
-                    verify_batch_circuit_from_extension_opened_arity4::<F, EF>(
+                let commit_phase_ops = opening.opening_proof
+                    .verify_extension::<F, EF>(
                         builder,
                         perm_config,
                         &commitment_cap,
@@ -1766,17 +1766,6 @@ where
                         &parent_index_bits,
                         core::slice::from_ref(&evals),
                     )
-                } else {
-                    verify_batch_circuit_from_extension_opened::<F, EF>(
-                        builder,
-                        perm_config,
-                        &commitment_cap,
-                        &dimensions,
-                        &parent_index_bits,
-                        core::slice::from_ref(&evals),
-                        salts_for_phase,
-                    )
-                }
                 .map_err(|e| {
                     VerificationError::InvalidProofShape(format!(
                         "Commit-phase MMCS verification failed for query {q}, phase {phase_idx}: {e:?}"
